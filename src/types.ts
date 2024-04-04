@@ -73,26 +73,26 @@ export interface ChatInterface {
   /**
    * Reload the chat with a new model.
    *
-   * @param localIdOrUrl local_id of the model or model artifact url.
+   * @param modelId model_id of the model to load.
    * @param chatOpts Extra options to overide chat behavior.
    * @param appConfig Override the app config in this load.
    * @returns A promise when reload finishes.
    * @note This is an async function.
    */
   reload: (
-    localIdOrUrl: string, chatOpts?: ChatOptions, appConfig?: AppConfig) => Promise<void>;
+    modelId: string, chatOpts?: ChatOptions, appConfig?: AppConfig) => Promise<void>;
 
   /**
    * Generate a response for a given input.
    *
-   * @param input The input prompt or an array of OpenAI-like `ChatCompletionMessageParam`.
+   * @param input The input prompt or a non-streaming ChatCompletionRequest.
    * @param progressCallback Callback that is being called to stream intermediate results.
    * @param streamInterval callback interval to call progresscallback
    * @param genConfig Configuration for this single generation that overrides pre-existing configs.
    * @returns The final result.
    */
   generate: (
-    input: string | Array<ChatCompletionMessageParam>,
+    input: string | ChatCompletionRequestNonStreaming,
     progressCallback?: GenerateProgressCallback,
     streamInterval?: number,
     genConfig?: GenerationConfig,
@@ -100,6 +100,12 @@ export interface ChatInterface {
 
   /**
    * OpenAI-style API. Generate a chat completion response for the given conversation and configuration.
+   * 
+   * The API is completely functional in behavior. That is, a previous request would not affect
+   * the current request's result. Thus, for multi-round chatting, users are responsible for
+   * maintaining the chat history. With that being said, as an implicit internal optimization, if we
+   * detect that the user is performing multiround chatting, we will preserve the KV cache and only
+   * prefill the new tokens.
    */
   chatCompletion(
     request: ChatCompletionRequestNonStreaming
