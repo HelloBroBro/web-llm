@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import { ResponseFormat } from "./openai_api_protocols";
+import { LogitProcessor, InitProgressCallback } from "./types";
 
 /**
  * Conversation template config
@@ -73,6 +74,24 @@ export interface ChatConfig {
  */
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
 export interface ChatOptions extends Partial<ChatConfig> { }
+
+/**
+ * Optional configurations for `CreateEngine()` and `CreateWebWorkerEngine()`.
+ * 
+ * chatOpts: To optionally override the `mlc-chat-config.json` of `modelId`.
+ * appConfig: Configure the app, including the list of models and whether to use IndexedDB cache.
+ * initProgressCallback: A callback for showing the progress of loading the model.
+ * logitProcessorRegistry: A register for stateful logit processors, see `webllm.LogitProcessor`.
+ * 
+ * @note All fields are optional, and `logitProcessorRegistry` is only used for `CreateEngine()`
+ * not `CreateWebWorkerEngine()`.
+ */
+export interface EngineConfig {
+  chatOpts?: ChatOptions,
+  appConfig?: AppConfig,
+  initProgressCallback?: InitProgressCallback,
+  logitProcessorRegistry?: Map<string, LogitProcessor>
+}
 
 /**
  * Config for a single generation.
@@ -201,9 +220,15 @@ export interface ModelRecord {
  * passed to the load.
  * 
  * @param model_list: models to be used.
+ * @param useIndexedDBCache: if true, will use IndexedDBCache to cache models and other artifacts.
+ * If false or unspecified, will use the Cache API. For more information of the two, see:
+ * https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria#what_technologies_store_data_in_the_browser 
+ * 
+ * @note Note that the Cache API is more well-tested in WebLLM as of now.
  */
 export interface AppConfig {
   model_list: Array<ModelRecord>;
+  useIndexedDBCache?: boolean;
 }
 
 /**
@@ -224,6 +249,7 @@ export const modelLibURLPrefix =
  * current WebLLM npm version.
  */
 export const prebuiltAppConfig: AppConfig = {
+  useIndexedDBCache: false,
   model_list: [
     // Llama-2
     {
