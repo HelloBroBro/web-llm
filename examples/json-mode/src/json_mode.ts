@@ -21,7 +21,7 @@ async function main() {
     const request: webllm.ChatCompletionRequest = {
         stream: false,  // works with streaming, logprobs, top_logprobs as well
         messages: [
-            { "role": "user", "content": "Write a short JSON file introducign yourself." }
+            { "role": "user", "content": "Write a short JSON file introducing yourself." }
         ],
         n: 2,
         max_gen_len: 128,

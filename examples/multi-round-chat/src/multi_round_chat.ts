@@ -17,7 +17,7 @@ async function main() {
   const initProgressCallback = (report: webllm.InitProgressReport) => {
     setLabel("init-label", report.text);
   };
-  const selectedModel = "Llama-2-7b-chat-hf-q4f32_1";
+  const selectedModel = "Llama-3-8B-Instruct-q4f32_1";
   const engine: webllm.EngineInterface = await webllm.CreateEngine(
     selectedModel,
     { initProgressCallback: initProgressCallback }
@@ -28,8 +28,8 @@ async function main() {
   const messages: webllm.ChatCompletionMessageParam[] = [
     {
       "role": "system",
-      "content": "[INST] <<SYS>>\n\nYou are a helpful, respectful and honest assistant. " +
-        "Be as happy as you can when speaking please.\n<</SYS>>\n\n "
+      "content": "You are a helpful, respectful and honest assistant. " +
+        "Be as happy as you can when speaking please. "
     },
     { "role": "user", "content": "Provide me three US states." },
   ];
