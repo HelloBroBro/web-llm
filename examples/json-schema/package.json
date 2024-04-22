@@ -3,8 +3,8 @@
     "version": "0.1.0",
     "private": true,
     "scripts": {
-        "start": "parcel src/json_mode.html  --port 8888",
-        "build": "parcel build src/json_mode.html --dist-dir lib"
+        "start": "parcel src/json_schema.html  --port 8885",
+        "build": "parcel build src/json_schema.html --dist-dir lib"
     },
     "devDependencies": {
         "buffer": "^5.7.1",
