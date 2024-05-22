@@ -2,7 +2,7 @@ export {
   ModelRecord,
   AppConfig,
   ChatOptions,
-  EngineConfig,
+  MLCEngineConfig,
   GenerationConfig,
   prebuiltAppConfig,
   modelVersion,
@@ -13,13 +13,13 @@ export {
 export {
   InitProgressCallback,
   InitProgressReport,
-  EngineInterface,
+  MLCEngineInterface,
   LogitProcessor,
 } from "./types";
 
 export {
-  Engine,
-  CreateEngine,
+  MLCEngine,
+  CreateMLCEngine,
 } from "./engine";
 
 export {
@@ -27,9 +27,9 @@ export {
 } from "./cache_util";
 
 export {
-  EngineWorkerHandler,
-  WebWorkerEngine,
-  CreateWebWorkerEngine
+  MLCEngineWorkerHandler,
+  WebWorkerMLCEngine,
+  CreateWebWorkerMLCEngine
 } from "./web_worker";
 
 export {
@@ -38,18 +38,16 @@ export {
   CustomRequestParams
 } from "./message"
 
-// TODO: Rename classes to ServiceWorker 
 export {
-  ServiceWorkerEngineHandler as WebServiceWorkerEngineHandler,
-  ServiceWorkerEngine as WebServiceWorkerEngine,
-  CreateServiceWorkerEngine as CreateWebServiceWorkerEngine,
+  ServiceWorkerMLCEngineHandler,
+  ServiceWorkerMLCEngine,
+  CreateServiceWorkerMLCEngine,
 } from "./service_worker";
 
-// TODO: Rename classes to ExtensionServiceWorker 
 export {
-  ServiceWorkerEngineHandler,
-  ServiceWorkerEngine,
-  CreateServiceWorkerEngine,
+  ServiceWorkerMLCEngineHandler as ExtensionServiceWorkerMLCEngineHandler,
+  ServiceWorkerMLCEngine as ExtensionServiceWorkerMLCEngine,
+  CreateServiceWorkerMLCEngine as CreateExtensionServiceWorkerMLCEngine,
 } from './extension_service_worker'
 
 export * from './openai_api_protocols/index';
