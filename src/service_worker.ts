@@ -1,8 +1,12 @@
 import * as tvmjs from "tvmjs";
-import { AppConfig, ChatOptions, MLCEngineConfig, ModelRecord } from "./config";
+import { AppConfig, ChatOptions, MLCEngineConfig } from "./config";
 import { ReloadParams, WorkerRequest, WorkerResponse } from "./message";
 import { MLCEngineInterface, InitProgressReport } from "./types";
-import { MLCEngineWorkerHandler, WebWorkerMLCEngine, ChatWorker } from "./web_worker";
+import {
+  MLCEngineWorkerHandler,
+  WebWorkerMLCEngine,
+  ChatWorker,
+} from "./web_worker";
 import { areAppConfigsEqual, areChatOptionsEqual } from "./utils";
 
 /* Service Worker Script */
@@ -39,7 +43,7 @@ export class ServiceWorkerMLCEngineHandler extends MLCEngineWorkerHandler {
   constructor(engine: MLCEngineInterface) {
     if (!self || !("addEventListener" in self)) {
       throw new Error(
-        "ServiceWorkerGlobalScope is not defined. ServiceWorkerMLCEngineHandler must be created in service worker script."
+        "ServiceWorkerGlobalScope is not defined. ServiceWorkerMLCEngineHandler must be created in service worker script.",
       );
     }
     const postMessageHandler = {
@@ -75,7 +79,7 @@ export class ServiceWorkerMLCEngineHandler extends MLCEngineWorkerHandler {
       message.waitUntil(
         new Promise((resolve, reject) => {
           onmessage(message, resolve, reject);
-        })
+        }),
       );
     });
   }
@@ -83,9 +87,12 @@ export class ServiceWorkerMLCEngineHandler extends MLCEngineWorkerHandler {
   onmessage(
     event: ExtendableMessageEvent,
     onComplete?: (value: any) => void,
-    onError?: () => void
+    onError?: () => void,
   ): void {
     const msg = event.data as WorkerRequest;
+    console.debug(
+      `ServiceWorker message: [${msg.kind}] ${JSON.stringify(msg.content)}`,
+    );
 
     if (msg.kind === "keepAlive") {
       const reply: WorkerRequest = {
@@ -131,7 +138,7 @@ export class ServiceWorkerMLCEngineHandler extends MLCEngineWorkerHandler {
         await this.engine.reload(
           params.modelId,
           params.chatOpts,
-          params.appConfig
+          params.appConfig,
         );
         this.modelId = params.modelId;
         this.chatOpts = params.chatOpts;
@@ -151,13 +158,12 @@ export class ServiceWorkerMLCEngineHandler extends MLCEngineWorkerHandler {
  */
 export class ServiceWorker implements ChatWorker {
   serviceWorker: IServiceWorker;
+  onmessage: () => void;
 
   constructor(serviceWorker: IServiceWorker) {
     this.serviceWorker = serviceWorker;
+    this.onmessage = () => {};
   }
-
-  // ServiceWorkerMLCEngine will later overwrite this
-  onmessage() {}
 
   postMessage(message: WorkerRequest) {
     if (!("serviceWorker" in navigator)) {
@@ -182,21 +188,31 @@ export class ServiceWorker implements ChatWorker {
  */
 export async function CreateServiceWorkerMLCEngine(
   modelId: string,
-  engineConfig?: MLCEngineConfig
+  engineConfig?: MLCEngineConfig,
 ): Promise<ServiceWorkerMLCEngine> {
   if (!("serviceWorker" in navigator)) {
-    throw new Error("Service worker API is not available");
+    throw new Error(
+      "Service worker API is not available in your browser. Please ensure that your browser supports service workers and that you are using a secure context (HTTPS). " +
+        "Check the browser compatibility and ensure that service workers are not disabled in your browser settings.",
+    );
   }
-  const registration = await (navigator.serviceWorker as ServiceWorkerContainer)
-    .ready;
-  const serviceWorkerMLCEngine = new ServiceWorkerMLCEngine(registration.active!);
+  const serviceWorkerAPI = navigator.serviceWorker as ServiceWorkerContainer;
+  const registration = await serviceWorkerAPI.ready;
+  const serviceWorker = registration.active || serviceWorkerAPI.controller;
+  if (!serviceWorker) {
+    throw new Error(
+      "Service worker failed to initialize. This could be due to a failure in the service worker registration process or because the service worker is not active. " +
+        "Please refresh the page to retry initializing the service worker.",
+    );
+  }
+  const serviceWorkerMLCEngine = new ServiceWorkerMLCEngine(serviceWorker);
   serviceWorkerMLCEngine.setInitProgressCallback(
-    engineConfig?.initProgressCallback
+    engineConfig?.initProgressCallback,
   );
   await serviceWorkerMLCEngine.init(
     modelId,
     engineConfig?.chatOpts,
-    engineConfig?.appConfig
+    engineConfig?.appConfig,
   );
   return serviceWorkerMLCEngine;
 }
@@ -218,6 +234,9 @@ export class ServiceWorkerMLCEngine extends WebWorkerMLCEngine {
       "message",
       (event: MessageEvent) => {
         const msg = event.data;
+        console.debug(
+          `MLC client message: [${msg.kind}] ${JSON.stringify(msg.content)}`,
+        );
         try {
           if (msg.kind === "heartbeat") {
             this.missedHeatbeat = 0;
@@ -230,12 +249,13 @@ export class ServiceWorkerMLCEngine extends WebWorkerMLCEngine {
             console.error("CreateWebServiceWorkerMLCEngine.onmessage", err);
           }
         }
-      }
+      },
     );
 
     setInterval(() => {
       this.worker.postMessage({ kind: "keepAlive", uuid: crypto.randomUUID() });
       this.missedHeatbeat += 1;
+      console.debug("missedHeatbeat", this.missedHeatbeat);
     }, keepAliveMs);
   }
 
@@ -253,7 +273,7 @@ export class ServiceWorkerMLCEngine extends WebWorkerMLCEngine {
   async init(
     modelId: string,
     chatOpts?: ChatOptions,
-    appConfig?: AppConfig
+    appConfig?: AppConfig,
   ): Promise<void> {
     const msg: WorkerRequest = {
       kind: "init",
