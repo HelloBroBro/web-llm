@@ -1,29 +1,32 @@
 <div align="center">
 
-[![NPM Package](./site/img/logo/mlc-logo-with-text-landscape.png)](https://mlc.ai)
-
 # WebLLM
-
 [![NPM Package](https://img.shields.io/badge/NPM_Package-Published-cc3534)](https://www.npmjs.com/package/@mlc-ai/web-llm)
-[!["WebLLM Chat Deployed"](https://img.shields.io/badge/WebLLM_Chat-Deployed-%2332a852?logo=github)](https://chat.webllm.ai/)
+[!["WebLLM Chat Deployed"](https://img.shields.io/badge/WebLLM_Chat-Deployed-%2332a852)](https://chat.webllm.ai/)
 [![Join Discoard](https://img.shields.io/badge/Join-Discord-7289DA?logo=discord&logoColor=white)]("https://discord.gg/9Xpy2HGBuD")
+[![Related Repository: WebLLM Chat](https://img.shields.io/badge/Related_Repo-WebLLM_Chat-fafbfc?logo=github)](https://github.com/mlc-ai/web-llm-chat/)
+[![Related Repository: MLC LLM](https://img.shields.io/badge/Related_Repo-MLC_LLM-fafbfc?logo=github)](https://github.com/mlc-ai/mlc-llm/)
 
-| [WebLLM Chat](https://chat.webllm.ai/) | [Get Started](#get-started) | [Examples](examples) | [Documentation](https://mlc.ai/mlc-llm/docs/deploy/javascript.html) | [MLC LLM](https://github.com/mlc-ai/mlc-llm) |
+**High-Performance In-Browser LLM Inference Engine.**
+
+
+[Get Started](#get-started) | [Examples](examples) | [Documentation](https://mlc.ai/mlc-llm/docs/deploy/javascript.html)
 
 </div>
 
-WebLLM is a modular and customizable javascript package that directly
-brings language model chats directly onto web browsers with hardware acceleration.
-**Everything runs inside the browser with no server support and is accelerated with WebGPU.**
+## Overview
+WebLLM is a high-performance in-browser LLM inference engine that directly
+brings language model inference directly onto web browsers with hardware acceleration.
+Everything runs inside the browser with no server support and is accelerated with WebGPU.
 
-**WebLLM is fully compatible with [OpenAI API](https://platform.openai.com/docs/api-reference/chat).**
+WebLLM is **fully compatible with [OpenAI API](https://platform.openai.com/docs/api-reference/chat).**
 That is, you can use the same OpenAI API on **any open source models** locally, with functionalities
 including json-mode, function-calling, streaming, etc.
 
 We can bring a lot of fun opportunities to build AI assistants for everyone and enable privacy while enjoying GPU acceleration.
 
 You can use WebLLM as a base [npm package](https://www.npmjs.com/package/@mlc-ai/web-llm) and build your own web application on top of it by following the [documentation](https://mlc.ai/mlc-llm/docs/deploy/javascript.html) and checking out [Get Started](#get-started).
-This project is a companion project of [MLC LLM](https://github.com/mlc-ai/mlc-llm), which runs LLMs natively on iPhone and other native local environments.
+This project is a companion project of [MLC LLM](https://github.com/mlc-ai/mlc-llm), which enables universal deployment of LLM across hardware environments.
 
 <div align="center">
 
