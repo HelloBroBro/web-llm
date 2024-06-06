@@ -31,13 +31,14 @@ async function main() {
     ],
     n: 3,
     temperature: 1.2, // high temperature gives much more random results
-    max_gen_len: 128, // To save time; enough to demonstrate the effect
+    max_tokens: 128, // To save time; enough to demonstrate the effect
     seed: 42,
   };
 
   const reply0 = await engine.chat.completions.create(request);
   console.log(reply0);
   console.log("First reply's last choice:\n" + (await engine.getMessage()));
+  console.log(reply0.usage);
 
   const reply1 = await engine.chat.completions.create(request);
   console.log(reply1);
@@ -56,7 +57,7 @@ async function main() {
     }
   }
 
-  console.log(await engine.runtimeStatsText());
+  console.log(reply1.usage);
 }
 
 // Run one of the functions

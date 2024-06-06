@@ -70,9 +70,11 @@ export class LLMChatPipeline {
   private decodingTotalTokens = 0;
   private prefillTotalTime = 0;
   private prefillTotalTokens = 0;
-  // same as `prefillTotalTokens` and `decodingTotalTokens`, but reset at every `prefillStep()`
+  // same stats as above, but reset at every `prefillStep()`
   private curRoundDecodingTotalTokens = 0;
   private curRoundPrefillTotalTokens = 0;
+  private curRoundDecodingTotalTime = 0;
+  private curRoundPrefillTotalTime = 0;
 
   // LogitProcessor
   private logitProcessor?: LogitProcessor = undefined;
@@ -360,6 +362,20 @@ export class LLMChatPipeline {
   }
 
   /**
+   * @returns the time spent on decode for a single request or a single choice in the request.
+   */
+  getCurRoundDecodingTotalTime(): number {
+    return this.curRoundDecodingTotalTime;
+  }
+
+  /**
+   * @returns the time spent on  for a single request or a single choice in the request.
+   */
+  getCurRoundPrefillTotalTime(): number {
+    return this.curRoundPrefillTotalTime;
+  }
+
+  /**
    * @returns Runtime stats information.
    */
   runtimeStatsText(): string {
@@ -367,6 +383,30 @@ export class LLMChatPipeline {
       `prefill: ${(this.prefillTotalTokens / this.prefillTotalTime).toFixed(4)} tokens/sec, ` +
       `decoding: ${(this.decodingTotalTokens / this.decodingTotalTime).toFixed(4)} tokens/sec`
     );
+  }
+
+  /**
+   * @returns Runtime stats information, starting from the last prefill performed.
+   */
+  curRoundRuntimeStatsText(): string {
+    return (
+      `prefill: ${this.getCurRoundPrefillTokensPerSec().toFixed(4)} tokens/sec, ` +
+      `decoding: ${this.getCurRoundDecodingTokensPerSec().toFixed(4)} tokens/sec`
+    );
+  }
+
+  /**
+   * @returns Prefill tokens per second, starting from the last prefill performed.
+   */
+  getCurRoundPrefillTokensPerSec(): number {
+    return this.curRoundPrefillTotalTokens / this.curRoundPrefillTotalTime;
+  }
+
+  /**
+   * @returns Prefill tokens per second, starting from the last prefill performed.
+   */
+  getCurRoundDecodingTokensPerSec(): number {
+    return this.curRoundDecodingTotalTokens / this.curRoundDecodingTotalTime;
   }
 
   /**
@@ -414,13 +454,15 @@ export class LLMChatPipeline {
     this.tokenLogprobArray = [];
     this.curRoundDecodingTotalTokens = 0;
     this.curRoundPrefillTotalTokens = 0;
+    this.curRoundPrefillTotalTime = 0;
+    this.curRoundDecodingTotalTime = 0;
     this.stopTriggered = false;
     const conversation = this.conversation;
 
     // initialize
     conversation.appendMessage(Role.user, inp, inp_role_str);
     conversation.appendReplyHeader(Role.assistant);
-    const promptTokens = this.getInputTokens(genConfig);
+    const promptTokens = this.getInputTokens();
 
     const tstart = performance.now();
     this.tvm.beginScope();
@@ -484,6 +526,7 @@ export class LLMChatPipeline {
     this.prefillTotalTime += (tend - tstart) / 1e3;
     this.prefillTotalTokens += promptTokens.length;
     this.curRoundPrefillTotalTokens += promptTokens.length;
+    this.curRoundPrefillTotalTime += (tend - tstart) / 1e3;
 
     this.processNextToken(nextToken, genConfig);
   }
@@ -511,6 +554,7 @@ export class LLMChatPipeline {
     this.decodingTotalTime += (tend - tstart) / 1e3;
     this.decodingTotalTokens += 1;
     this.curRoundDecodingTotalTokens += 1;
+    this.curRoundDecodingTotalTime += (tend - tstart) / 1e3;
 
     this.processNextToken(nextToken, genConfig);
   }
@@ -541,14 +585,16 @@ export class LLMChatPipeline {
       throw Error("Cannot call process when it is stoppped");
     }
 
-    // Get max_gen_len and stopStrs, possibly overridden by genConfig for this round
-    let max_gen_len = this.config.max_gen_len;
-    if (genConfig !== undefined && genConfig.max_gen_len) {
-      max_gen_len = genConfig.max_gen_len;
+    // Get max_tokens from generationConfig (specified by user in completion request)
+    // If not specified, do not set a limit
+    let max_tokens = Infinity;
+    if (genConfig !== undefined && genConfig.max_tokens) {
+      max_tokens = genConfig.max_tokens;
     }
-    if (max_gen_len <= 0) {
-      throw new Error("`max_gen_len` should be greater than 0.");
+    if (max_tokens <= 0) {
+      throw new Error("`max_tokens` should be greater than 0.");
     }
+    // Get stopStrs, possibly overridden by genConfig for this round
     let stopStrs = this.stopStr;
     if (genConfig !== undefined && genConfig.stop) {
       stopStrs = stopStrs.concat(genConfig.stop);
@@ -585,10 +631,21 @@ export class LLMChatPipeline {
     }
     this.outputMessage = outputMessage;
 
-    // Stop condition 3: exceed max_gen_len
-    if (this.outputIds.length >= max_gen_len) {
+    // Stop condition 3: exceed max_tokens
+    if (this.outputIds.length >= max_tokens) {
       this.stopTriggered = true;
       this.finishReason = "length";
+      log.info("Generation stopped due to exceeding max_tokens.");
+    }
+
+    // Stop condition 4: exceed KVCache's context window size
+    if (
+      this.slidingWindowSize == -1 &&
+      this.filledKVCacheLength == this.contextWindowSize
+    ) {
+      this.stopTriggered = true;
+      this.finishReason = "length";
+      log.info("Generation stopped due to exceeding context_window_size.");
     }
 
     // Finally, modify conversation history if stopped
@@ -860,34 +917,9 @@ export class LLMChatPipeline {
     return sampledToken;
   }
 
-  private getInputTokens(genConfig?: GenerationConfig): Array<number> {
-    // Get mean_gen_len and max_gen_len, possibly overridden by genConfig
-    let mean_gen_len = this.config.mean_gen_len;
-    let shift_fill_factor = this.config.shift_fill_factor;
-    if (genConfig !== undefined) {
-      if (
-        genConfig.mean_gen_len !== undefined &&
-        genConfig.mean_gen_len !== null
-      ) {
-        mean_gen_len = genConfig.mean_gen_len;
-      }
-      if (
-        genConfig.shift_fill_factor !== undefined &&
-        genConfig.shift_fill_factor !== null
-      ) {
-        shift_fill_factor = genConfig.shift_fill_factor;
-      }
-    }
-    // Check range validity
-    if (shift_fill_factor <= 0 || shift_fill_factor > 1) {
-      throw new Error("Make sure 0 < `shift_fill_factor` <= 1.");
-    }
-    if (mean_gen_len <= 0) {
-      throw new Error("`mean_gen_len` should be greater than zero.");
-    }
-
+  private getInputTokens(): Array<number> {
     let tokens: Array<number> = [];
-    let prompts;
+    let prompts: string[];
     // beginning of the conversation
     if (this.filledKVCacheLength === 0) {
       if (
@@ -900,74 +932,28 @@ export class LLMChatPipeline {
     } else {
       prompts = this.conversation.getPrompArrayLastRound();
     }
-    // keep system prompt when possible
-    tokens.push(...this.tokenizer.encode(prompts[0]));
 
-    let ctxLength = tokens.length;
-    let context = [];
-
-    // detect if we go out of the range
-    let needShiftWindow = false;
-    for (let i = prompts.length - 1; i > 0; --i) {
+    // Encode all prompts
+    let numPromptTokens = 0;
+    for (let i = 0; i < prompts.length; i++) {
       const encoded = this.tokenizer.encode(prompts[i]);
-      ctxLength += encoded.length;
-      if (
-        this.slidingWindowSize == -1 && // There is no contextWindowSize if we use sliding window
-        this.filledKVCacheLength + ctxLength + mean_gen_len >=
-          this.contextWindowSize
-      ) {
-        needShiftWindow = true;
-        break;
-      }
-      context.unshift(encoded);
+      numPromptTokens += encoded.length;
+      tokens.push(...encoded);
     }
-    if (!needShiftWindow) {
-      for (const ctx of context) {
-        tokens.push(...ctx);
-      }
-      return tokens;
-    }
-
-    // Code starting below should not be reached when using sliding window.
-    if (this.slidingWindowSize != -1) {
-      throw Error(
-        "Should not shift window when using sliding window attention.",
+    // Check if input tokens exceed context window size
+    if (
+      this.slidingWindowSize == -1 && // There is no limit on contextWindowSize for sliding window
+      numPromptTokens + this.filledKVCacheLength > this.contextWindowSize
+    ) {
+      throw new Error(
+        "Prompt tokens exceed context window size:" +
+          " number of prompt tokens: " +
+          numPromptTokens +
+          "; context window size: " +
+          this.contextWindowSize +
+          "\nConsider shortening the prompt, or increase `context_window_size`, or " +
+          "using sliding window via `sliding_window_size`.",
       );
-    }
-
-    // need shift window and re-encode
-    log.info("need shift window");
-    this.filledKVCacheLength = 0;
-    this.resetKVCache();
-
-    // abandon all tokens we collected
-    if (this.conversation.config.system_prefix_token_ids !== undefined) {
-      tokens = [...this.conversation.config.system_prefix_token_ids];
-    } else {
-      tokens = [];
-    }
-
-    const all_prompts = this.conversation.getPromptArray();
-    tokens.push(...this.tokenizer.encode(all_prompts[0]));
-    context = [];
-    ctxLength = tokens.length;
-    // only keep shift_fill_factor of the window context
-    for (let i = all_prompts.length - 1; i > 0; --i) {
-      const encoded = this.tokenizer.encode(all_prompts[i]);
-      ctxLength += encoded.length;
-      if (
-        ctxLength >= shift_fill_factor * this.contextWindowSize &&
-        i + 2 < all_prompts.length
-      ) {
-        break;
-      }
-      context.unshift(encoded);
-    }
-    for (const ctx of context) {
-      tokens.push(...ctx);
-    }
-    if (tokens.length + mean_gen_len >= this.contextWindowSize) {
-      throw Error("Exceed max window length curr=" + tokens.length);
     }
     return tokens;
   }
@@ -994,10 +980,12 @@ export class LLMChatPipeline {
       this.prefillTotalTime += (tend - tstart) / 1e3;
       this.prefillTotalTokens += inputIds.length;
       this.curRoundPrefillTotalTokens += inputIds.length;
+      this.curRoundPrefillTotalTime += (tend - tstart) / 1e3;
     } else {
       this.decodingTotalTime += (tend - tstart) / 1e3;
       this.decodingTotalTokens += 1;
       this.curRoundDecodingTotalTokens += 1;
+      this.curRoundDecodingTotalTime += (tend - tstart) / 1e3;
     }
     return nextToken;
   }

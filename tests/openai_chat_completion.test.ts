@@ -11,6 +11,27 @@ import { MessagePlaceholders } from "../src/config";
 import { describe, expect, test } from "@jest/globals";
 
 describe("Check chat completion unsupported requests", () => {
+  test("stream_options without stream specified", () => {
+    expect(() => {
+      const request: ChatCompletionRequest = {
+        messages: [{ role: "user", content: "Hello! " }],
+        stream_options: { include_usage: true },
+      };
+      postInitAndCheckFields(request, "Llama-3-8B-Instruct-q4f32_1-MLC");
+    }).toThrow("Only specify stream_options when stream=True.");
+  });
+
+  test("stream_options with stream=false", () => {
+    expect(() => {
+      const request: ChatCompletionRequest = {
+        stream: false,
+        messages: [{ role: "user", content: "Hello! " }],
+        stream_options: { include_usage: true },
+      };
+      postInitAndCheckFields(request, "Llama-3-8B-Instruct-q4f32_1-MLC");
+    }).toThrow("Only specify stream_options when stream=True.");
+  });
+
   test("High-level unsupported fields", () => {
     expect(() => {
       const request: ChatCompletionRequest = {
@@ -68,7 +89,7 @@ describe("Check chat completion unsupported requests", () => {
     expect(() => {
       const request: ChatCompletionRequest = {
         messages: [{ role: "user", content: "Hello! " }],
-        max_gen_len: 10,
+        max_tokens: 10,
         seed: 42.2, // Note that Number.isInteger(42.0) is true
       };
       postInitAndCheckFields(request, "Llama-3-8B-Instruct-q4f32_1-MLC");
@@ -120,7 +141,7 @@ describe("Supported requests", () => {
       ],
       n: 3,
       temperature: 1.5,
-      max_gen_len: 25,
+      max_tokens: 25,
       frequency_penalty: 0.2,
       seed: 42,
       logprobs: true,

@@ -40,13 +40,13 @@ async function mainNonStreaming() {
     ],
     n: 3,
     temperature: 1.5,
-    max_gen_len: 256,
+    max_tokens: 256,
   };
 
   const reply0 = await engine.chat.completions.create(request);
   console.log(reply0);
 
-  console.log(await engine.runtimeStatsText());
+  console.log(reply0.usage);
 }
 
 /**
@@ -67,6 +67,7 @@ async function mainStreaming() {
 
   const request: webllm.ChatCompletionRequest = {
     stream: true,
+    stream_options: { include_usage: true },
     messages: [
       {
         role: "system",
@@ -79,22 +80,21 @@ async function mainStreaming() {
       { role: "user", content: "Two more please!" },
     ],
     temperature: 1.5,
-    max_gen_len: 256,
+    max_tokens: 256,
   };
 
   const asyncChunkGenerator = await engine.chat.completions.create(request);
   let message = "";
   for await (const chunk of asyncChunkGenerator) {
     console.log(chunk);
-    if (chunk.choices[0].delta.content) {
-      // Last chunk has undefined content
-      message += chunk.choices[0].delta.content;
-    }
+    message += chunk.choices[0]?.delta?.content || "";
     setLabel("generate-label", message);
+    if (chunk.usage) {
+      console.log(chunk.usage); // only last chunk has usage
+    }
     // engine.interruptGenerate();  // works with interrupt as well
   }
   console.log("Final message:\n", await engine.getMessage()); // the concatenated message
-  console.log(await engine.runtimeStatsText());
 }
 
 // Run one of the function below

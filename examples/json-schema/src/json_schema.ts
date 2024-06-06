@@ -52,7 +52,7 @@ async function simpleStructuredTextExample() {
           "boolean field named is_accepted, and a float field named num.",
       },
     ],
-    max_gen_len: 128,
+    max_tokens: 128,
     response_format: {
       type: "json_object",
       schema: schema2,
@@ -62,7 +62,7 @@ async function simpleStructuredTextExample() {
   const reply0 = await engine.chatCompletion(request);
   console.log(reply0);
   console.log("Output:\n" + (await engine.getMessage()));
-  console.log(await engine.runtimeStatsText());
+  console.log(reply0.usage);
 }
 
 // The json schema and prompt is taken from
@@ -119,7 +119,7 @@ async function harryPotterExample() {
           "Name is a string of character name. House is one of Gryffindor, Hufflepuff, Ravenclaw, Slytherin. Blood status is one of Pure-blood, Half-blood, Muggle-born. Occupation is one of Student, Professor, Ministry of Magic, Other. Wand is an object with wood, core, and length. Alive is a boolean. Patronus is a string.",
       },
     ],
-    max_gen_len: 128,
+    max_tokens: 128,
     response_format: {
       type: "json_object",
       schema: schema,
@@ -129,7 +129,7 @@ async function harryPotterExample() {
   const reply = await engine.chatCompletion(request);
   console.log(reply);
   console.log("Output:\n" + (await engine.getMessage()));
-  console.log(await engine.runtimeStatsText());
+  console.log(reply.usage);
 }
 
 async function functionCallingExample() {
@@ -207,7 +207,7 @@ async function functionCallingExample() {
   const reply = await engine.chat.completions.create(request);
   console.log(reply.choices[0].message.content);
 
-  console.log(await engine.runtimeStatsText());
+  console.log(reply.usage);
 }
 
 async function main() {
