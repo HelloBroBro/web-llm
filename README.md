@@ -38,7 +38,7 @@ This project is a companion project of [MLC LLM](https://github.com/mlc-ai/mlc-l
 
 - [**Full OpenAI API Compatibility**](#full-openai-compatibility): Seamlessly integrate your app with WebLLM using OpenAI API with functionalities such as JSON-mode, function-calling, streaming, and more.
 
-- [**Extensive Model Support**](#built-in-models): WebLLM natively supports a range of models including Llama 3, Phi 3, Gemma, Mistral, Qwen(通义千问), and many others, making it versatile for various AI tasks.
+- [**Extensive Model Support**](#built-in-models): WebLLM natively supports a range of models including Llama 3, Phi 3, Gemma, Mistral, Qwen(通义千问), and many others, making it versatile for various AI tasks. For the complete supported model list, check [MLC Models](https://mlc.ai/models).
 
 - [**Custom Model Integration**](#custom-models): Easily integrate and deploy custom models in MLC format, allowing you to adapt WebLLM to specific needs and scenarios, enhancing flexibility in model deployment.
 
@@ -52,17 +52,15 @@ This project is a companion project of [MLC LLM](https://github.com/mlc-ai/mlc-l
 
 ## Built-in Models
 
-The following models are natively supported in WebLLM and their detailed configuration can be accessed from [`prebuiltAppConfig.model_list`](https://github.com/mlc-ai/web-llm/blob/main/src/config.ts#L293).
+Check the complete list of available models on [MLC Models](https://mlc.ai/models). WebLLM supports a subset of these available models and the list can be accessed at [`prebuiltAppConfig.model_list`](https://github.com/mlc-ai/web-llm/blob/main/src/config.ts#L293).
 
-- Llama 3
-- Phi 3
-- Mistral
-- Gemma
-- Qwen (通义千问)
-- Hermes (finetuned variants of Llama 3 and Mistral)
-- RedPajama
-- Zephyr
-- TinyLlama
+Here are the primary families of models currently supported:
+
+- **Llama**: Llama 3, Llama 2, Hermes-2-Pro-Llama-3
+- **Phi**: Phi 3, Phi 2, Phi 1.5
+- **Gemma**: Gemma-2B
+- **Mistral**: Mistral-7B-v0.3, Hermes-2-Pro-Mistral-7B, NeuralHermes-2.5-Mistral-7B, OpenHermes-2.5-Mistral-7B
+- **Qwen (通义千问)**: Qwen2 0.5B, 1.5B, 7B
 
 If you need more models, [request a new model via opening an issue](https://github.com/mlc-ai/web-llm/issues/new/choose) or check [Custom Models](#custom-models) for how to compile and use your own models with WebLLM.
 
