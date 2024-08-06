@@ -1,10 +1,10 @@
 {
-  "name": "seed-to-reproduce",
+  "name": "openai-api",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "parcel src/seed.html  --port 8888",
-    "build": "parcel build src/seed.html --dist-dir lib"
+    "start": "parcel src/function_calling_openai.html  --port 8888",
+    "build": "parcel build src/function_calling_openai.html --dist-dir lib"
   },
   "devDependencies": {
     "buffer": "^5.7.1",
