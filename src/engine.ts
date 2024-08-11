@@ -1,7 +1,5 @@
 import * as tvmjs from "tvmjs";
 import log from "loglevel";
-import { Tokenizer } from "@mlc-ai/web-tokenizers";
-import * as API from "./openai_api_protocols/apis";
 import {
   ChatConfig,
   ChatOptions,
@@ -15,6 +13,7 @@ import {
 } from "./config";
 import { LLMChatPipeline } from "./llm_chat";
 import {
+  // ChatCompletion
   ChatCompletionRequest,
   ChatCompletion,
   ChatCompletionChunk,
@@ -25,8 +24,15 @@ import {
   ChatCompletionRequestBase,
   CompletionUsage,
   ChatCompletionMessageToolCall,
+  // Completion
+  CompletionCreateParamsNonStreaming,
+  CompletionCreateParamsStreaming,
+  CompletionCreateParamsBase,
+  CompletionCreateParams,
+  Completion,
+  CompletionChoice,
 } from "./openai_api_protocols/index";
-import * as ChatCompletionAPI from "./openai_api_protocols/index";
+import * as API from "./openai_api_protocols/index";
 import {
   InitProgressCallback,
   MLCEngineInterface,
@@ -35,34 +41,23 @@ import {
   LogLevel,
 } from "./types";
 import {
-  Conversation,
   compareConversationObject,
   getConversation,
+  getConversationFromChatCompletionRequest,
 } from "./conversation";
-import { cleanModelUrl } from "./support";
+import { cleanModelUrl, getToolCallFromOutputMessage } from "./support";
 import {
   ChatModuleNotInitializedError,
   ConfigurationNotInitializedError,
-  ContentTypeError,
   DeviceLostError,
   FeatureSupportError,
-  FunctionNotFoundError,
-  InvalidToolChoiceError,
-  MessageOrderError,
   MissingModelWasmError,
   ModelNotFoundError,
   ModelNotLoadedError,
   ShaderF16SupportError,
-  SystemMessageOrderError,
-  ToolCallOutputInvalidTypeError,
-  ToolCallOutputMissingFieldsError,
-  ToolCallOutputParseError,
-  UnsupportedRoleError,
-  UnsupportedTokenizerFilesError,
-  UnsupportedToolChoiceTypeError,
-  UnsupportedToolTypeError,
   WebGPUNotAvailableError,
 } from "./error";
+import { asyncLoadTokenizer } from "./cache_util";
 
 /**
  * Creates `MLCEngine`, and loads `modelId` onto WebGPU.
@@ -90,10 +85,14 @@ export async function CreateMLCEngine(
 /**
  * The main interface of MLCEngine, which loads a model and performs tasks.
  *
- * You can either initialize one with `webllm.CreateMLCEngine(modelId)`, or `webllm.MLCEngine().reload(modelId)`.
+ * You can either initialize one with `webllm.CreateMLCEngine(modelId)`, or
+ * `webllm.MLCEngine().reload(modelId)`.
  */
 export class MLCEngine implements MLCEngineInterface {
+  /** For chat.completions.create() */
   public chat: API.Chat;
+  /** For completions.create() */
+  public completions: API.Completions;
 
   private currentModelId?: string = undefined; // Model current loaded, undefined if nothing is loaded
   private logger: (msg: string) => void = log.info;
@@ -114,7 +113,12 @@ export class MLCEngine implements MLCEngineInterface {
     this.setLogitProcessorRegistry(engineConfig?.logitProcessorRegistry);
 
     this.chat = new API.Chat(this);
+    this.completions = new API.Completions(this);
   }
+
+  //-----------------------
+  // 0. Setters and getters
+  //-----------------------
 
   setAppConfig(appConfig: AppConfig) {
     this.appConfig = appConfig;
@@ -133,6 +137,10 @@ export class MLCEngine implements MLCEngineInterface {
   ) {
     this.logitProcessorRegistry = logitProcessorRegistry;
   }
+
+  //----------------------------------------
+  // 1. Model/pipeline loading and unloading
+  //----------------------------------------
 
   /**
    * Reload model `modelId`.
@@ -283,10 +291,11 @@ export class MLCEngine implements MLCEngineInterface {
     });
     tvm.initWebGPU(gpuDetectOutput.device);
 
-    const tokenizer = await this.asyncLoadTokenizer(
+    const tokenizer = await asyncLoadTokenizer(
       modelUrl,
       this.config,
       this.appConfig,
+      this.logger,
     );
     const cacheType = this.appConfig.useIndexedDBCache ? "indexeddb" : "cache";
     await tvm.fetchNDArrayCache(
@@ -320,23 +329,34 @@ export class MLCEngine implements MLCEngineInterface {
     }
   }
 
-  async generate(
-    input: string | ChatCompletionRequestNonStreaming,
-    progressCallback?: GenerateProgressCallback,
-    streamInterval = 1,
-    genConfig?: GenerationConfig,
-  ): Promise<string> {
-    log.warn(
-      "WARNING: `generate()` will soon be deprecated. " +
-        "Please use `engine.chat.completions.create()` instead. " +
-        "For multi-round chatting, see `examples/multi-round-chat` on how to use " +
-        "`engine.chat.completions.create()` to achieve the same effect.",
-    );
-    return this._generate(input, progressCallback, streamInterval, genConfig);
+  /**
+   * Unloads the currently loaded model and destroy the webgpu device. Waits
+   * until the webgpu device finishes all submitted work and destroys itself.
+   * @note This is an asynchronous function.
+   */
+  async unload() {
+    this.deviceLostIsError = false; // so that unload() does not trigger device.lost error
+    this.pipeline?.dispose();
+    // Wait until device is actually destroyed so we can safely set deviceLostIsError back to true
+    await this.pipeline?.sync();
+    this.pipeline = undefined;
+    this.currentModelId = undefined;
+    this.deviceLostIsError = true;
+    if (this.reloadController) {
+      this.reloadController.abort("Engine.unload() is called.");
+      this.reloadController = undefined;
+    }
   }
 
+  //---------------------------------------------------
+  // 2. Underlying auto-regressive generation functions
+  //---------------------------------------------------
+
   private async _generate(
-    input: string | ChatCompletionRequestNonStreaming,
+    input:
+      | string
+      | ChatCompletionRequestNonStreaming
+      | CompletionCreateParamsNonStreaming,
     progressCallback?: GenerateProgressCallback,
     streamInterval = 1,
     genConfig?: GenerationConfig,
@@ -363,18 +383,39 @@ export class MLCEngine implements MLCEngineInterface {
   }
 
   /**
-   * Similar to `generate()`; but instead of using callback, we use an async iterable.
+   * Similar to `_generate()`; but instead of using callback, we use an async iterable.
    * @param request Request for chat completion.
    * @param genConfig Generation config extraced from `request`.
    */
-  async *chatCompletionAsyncChunkGenerator(
+  asyncGenerate(
     request: ChatCompletionRequestStreaming,
     genConfig: GenerationConfig,
-  ): AsyncGenerator<ChatCompletionChunk, void, void> {
+  ): AsyncGenerator<ChatCompletionChunk, void, void>;
+  asyncGenerate(
+    request: CompletionCreateParamsStreaming,
+    genConfig: GenerationConfig,
+  ): AsyncGenerator<Completion, void, void>;
+  async *asyncGenerate(
+    request: ChatCompletionRequestStreaming | CompletionCreateParamsStreaming,
+    genConfig: GenerationConfig,
+  ): AsyncGenerator<ChatCompletionChunk | Completion, void, void> {
+    // 0. Pre-processing
+    const isChatCompletion = "messages" in request;
+    const isFunctionCalling =
+      "tools" in request &&
+      request.tools !== undefined &&
+      request.tools !== null;
+    if (isFunctionCalling && !isChatCompletion) {
+      throw new Error(
+        "Expect `chat.completions` with tools, not `completions`.",
+      );
+    }
     postInitAndCheckGenerationConfigValues(genConfig);
     if (request.seed !== null && request.seed !== undefined) {
       this.getPipeline().setSeed(request.seed);
     }
+
+    // 1. Helper function that generates the chunk
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const model = this.currentModelId!;
     const created = Date.now();
@@ -396,7 +437,7 @@ export class MLCEngine implements MLCEngineInterface {
 
     async function _getChunk(
       thisModule: MLCEngine,
-    ): Promise<ChatCompletionChunk | undefined> {
+    ): Promise<ChatCompletionChunk | Completion | undefined> {
       // Remove the replacement character (U+FFFD) from the response to handle emojis.
       // Each emoji is made up of multiples of 4 tokens; when truncated, it is displayed as �, so
       // we skip this delta until a full emoji is rendered
@@ -410,30 +451,47 @@ export class MLCEngine implements MLCEngineInterface {
 
       const deltaMessage = curMessage.slice(prevMessageLength);
       prevMessageLength = curMessage.length;
-      const chunk: ChatCompletionChunk = {
-        id: id,
-        choices: [
-          {
-            delta: { content: deltaMessage, role: "assistant" },
-            finish_reason: null, // not finished yet
-            index: 0,
-            logprobs: request.logprobs
-              ? ({
-                  content: thisModule
-                    .getPipeline()
-                    .getTokenLogprobArray()
-                    .slice(-1), // always the last entry
-                } as ChatCompletionChunk.Choice.Logprobs)
-              : null,
-          },
-        ],
-        model: model,
-        object: "chat.completion.chunk",
-        created: created,
-      };
-      return chunk;
+      const logprobs = request.logprobs
+        ? ({
+            content: thisModule.getPipeline().getTokenLogprobArray().slice(-1), // always the last entry
+          } as ChatCompletionChunk.Choice.Logprobs)
+        : null;
+      if (isChatCompletion) {
+        const chunk: ChatCompletionChunk = {
+          id: id,
+          choices: [
+            {
+              delta: { content: deltaMessage, role: "assistant" },
+              finish_reason: null, // not finished yet
+              index: 0,
+              logprobs: logprobs,
+            },
+          ],
+          model: model,
+          object: "chat.completion.chunk",
+          created: created,
+        };
+        return chunk;
+      } else {
+        const chunk: Completion = {
+          id: id,
+          choices: [
+            {
+              text: deltaMessage,
+              finish_reason: null, // not finished yet
+              index: 0,
+              logprobs: logprobs,
+            },
+          ],
+          model: model,
+          object: "text_completion",
+          created: created,
+        };
+        return chunk;
+      }
     }
 
+    // 2. Auto-regressive loop
     await this.prefill(request, genConfig);
     let curChunk = await _getChunk(this); // prefill produces a chunk
     if (curChunk) {
@@ -457,10 +515,9 @@ export class MLCEngine implements MLCEngineInterface {
       this.getPipeline().setSeed(Date.now());
     }
 
+    // 3. Last chunk empty marking the end
     // If function calling, use the last chunk to return tool_calls
     let finish_reason = this.getFinishReason()!;
-    const isFunctionCalling =
-      request.tools !== undefined && request.tools !== null;
     let tool_calls:
       | Array<ChatCompletionChunk.Choice.Delta.ToolCall>
       | undefined;
@@ -469,32 +526,50 @@ export class MLCEngine implements MLCEngineInterface {
       // If stopped due to length or abort, cannot output return tool_calls field
       finish_reason = "tool_calls";
       const outputMessage = await this.getMessage();
-      tool_calls = this.getToolCallFromOutputMessage(
+      tool_calls = getToolCallFromOutputMessage(
         outputMessage,
         /*isStreaming=*/ true,
       ) as Array<ChatCompletionChunk.Choice.Delta.ToolCall>;
     }
 
-    const lastChunk: ChatCompletionChunk = {
-      id: id,
-      choices: [
-        {
-          delta: isFunctionCalling
-            ? {
-                role: "assistant",
-                tool_calls: tool_calls,
-              }
-            : {},
-          finish_reason: finish_reason,
-          index: 0,
-        },
-      ],
-      model: model,
-      object: "chat.completion.chunk",
-      created: created,
-    };
-    yield lastChunk;
+    if (isChatCompletion) {
+      const lastChunk: ChatCompletionChunk = {
+        id: id,
+        choices: [
+          {
+            delta: isFunctionCalling
+              ? {
+                  role: "assistant",
+                  tool_calls: tool_calls,
+                }
+              : {},
+            finish_reason: finish_reason,
+            index: 0,
+          },
+        ],
+        model: model,
+        object: "chat.completion.chunk",
+        created: created,
+      };
+      yield lastChunk;
+    } else {
+      const lastChunk: Completion = {
+        id: id,
+        choices: [
+          {
+            text: "",
+            finish_reason: finish_reason,
+            index: 0,
+          },
+        ],
+        model: model,
+        object: "text_completion",
+        created: created,
+      };
+      yield lastChunk;
+    }
 
+    // 4. Usage chunk
     if (request.stream_options?.include_usage) {
       const completion_tokens =
         this.getPipeline().getCurRoundDecodingTotalTokens();
@@ -503,24 +578,63 @@ export class MLCEngine implements MLCEngineInterface {
         this.getPipeline().getCurRoundPrefillTokensPerSec();
       const decode_tokens_per_s =
         this.getPipeline().getCurRoundDecodingTokensPerSec();
-      const usageChunk: ChatCompletionChunk = {
-        id: id,
-        choices: [],
-        usage: {
-          completion_tokens: completion_tokens,
-          prompt_tokens: prompt_tokens,
-          total_tokens: completion_tokens + prompt_tokens,
-          extra: {
-            prefill_tokens_per_s: prefill_tokens_per_s,
-            decode_tokens_per_s: decode_tokens_per_s,
-          },
-        } as CompletionUsage,
-        model: model,
-        object: "chat.completion.chunk",
-        created: created,
+      const usage: CompletionUsage = {
+        completion_tokens: completion_tokens,
+        prompt_tokens: prompt_tokens,
+        total_tokens: completion_tokens + prompt_tokens,
+        extra: {
+          prefill_tokens_per_s: prefill_tokens_per_s,
+          decode_tokens_per_s: decode_tokens_per_s,
+        },
       };
-      yield usageChunk;
+      if (isChatCompletion) {
+        const usageChunk: ChatCompletionChunk = {
+          id: id,
+          choices: [],
+          usage: usage,
+          model: model,
+          object: "chat.completion.chunk",
+          created: created,
+        };
+        yield usageChunk;
+      } else {
+        const usageChunk: Completion = {
+          id: id,
+          choices: [],
+          usage: usage,
+          model: model,
+          object: "text_completion",
+          created: created,
+        };
+        yield usageChunk;
+      }
     }
+  }
+
+  async interruptGenerate() {
+    this.interruptSignal = true;
+  }
+
+  //------------------------------
+  // 3. High-level generation APIs
+  //------------------------------
+
+  /**
+   * A legacy E2E generation API. Functionally equivalent to `chatCompletion()`.
+   */
+  async generate(
+    input: string | ChatCompletionRequestNonStreaming,
+    progressCallback?: GenerateProgressCallback,
+    streamInterval = 1,
+    genConfig?: GenerationConfig,
+  ): Promise<string> {
+    log.warn(
+      "WARNING: `generate()` will soon be deprecated. " +
+        "Please use `engine.chat.completions.create()` instead. " +
+        "For multi-round chatting, see `examples/multi-round-chat` on how to use " +
+        "`engine.chat.completions.create()` to achieve the same effect.",
+    );
+    return this._generate(input, progressCallback, streamInterval, genConfig);
   }
 
   /**
@@ -528,7 +642,7 @@ export class MLCEngine implements MLCEngineInterface {
    *
    * @param request A OpenAI-style ChatCompletion request.
    *
-   * @note For each choice (i.e. `n`), a request is defined by a single `prefill()` and mulitple
+   * @note For each choice (i.e. `n`), a request is defined by a single `prefill()` and multiple
    * `decode()`. This is important as it determines the behavior of various fields including `seed`.
    */
   async chatCompletion(
@@ -547,7 +661,7 @@ export class MLCEngine implements MLCEngineInterface {
     if (!this.currentModelId) {
       throw new ModelNotLoadedError();
     }
-    ChatCompletionAPI.postInitAndCheckFields(request, this.currentModelId);
+    API.postInitAndCheckFieldsChatCompletion(request, this.currentModelId);
     const genConfig: GenerationConfig = {
       frequency_penalty: request.frequency_penalty,
       presence_penalty: request.presence_penalty,
@@ -561,16 +675,16 @@ export class MLCEngine implements MLCEngineInterface {
       response_format: request.response_format,
     };
 
-    // 1. If request is streaming, return an AsyncIterable (an iterable version of `generate()`)
+    // 1. If request is streaming, return an AsyncIterable (an iterable version of `_generate()`)
     if (request.stream) {
-      return this.chatCompletionAsyncChunkGenerator(request, genConfig);
+      return this.asyncGenerate(request, genConfig);
     }
 
     if (request.seed !== null && request.seed !== undefined) {
       this.getPipeline().setSeed(request.seed);
     }
 
-    // 2. If request is non-streaming, directly reuse `generate()`
+    // 2. If request is non-streaming, directly reuse `_generate()`
     const n = request.n ? request.n : 1;
     const choices: Array<ChatCompletion.Choice> = [];
     let completion_tokens = 0;
@@ -600,7 +714,7 @@ export class MLCEngine implements MLCEngineInterface {
       if (this.getFinishReason()! == "stop" && isFunctionCalling) {
         // If stopped due to length or abort, cannot output return tool_calls field
         finish_reason = "tool_calls";
-        tool_calls = this.getToolCallFromOutputMessage(
+        tool_calls = getToolCallFromOutputMessage(
           outputMessage,
           /*isStreaming=*/ false,
         );
@@ -656,42 +770,119 @@ export class MLCEngine implements MLCEngineInterface {
     return response;
   }
 
-  async interruptGenerate() {
-    this.interruptSignal = true;
-  }
-
-  async runtimeStatsText(): Promise<string> {
-    log.warn(
-      "WARNING: `runtimeStatsText()` will soon be deprecated. " +
-        "Please use `ChatCompletion.usage` for non-streaming requests, or " +
-        "`ChatCompletionChunk.usage` for streaming requests, enabled by `stream_options`. " +
-        "The only flow that expects to use `runtimeStatsText()` as of now is `forwardTokensAndSample()`.",
-    );
-    return this.getPipeline().runtimeStatsText();
-  }
-
-  async resetChat(keepStats = false) {
-    this.pipeline?.resetChat(keepStats);
-  }
-
   /**
-   * Unloads the currently loaded model and destroy the webgpu device. Waits
-   * until the webgpu device finishes all submitted work and destroys itself.
-   * @note This is an asynchronous function.
+   * Completes a single CompletionCreateParams, a text completion with no chat template.
+   *
+   * @param request A OpenAI-style Completion request.
+   *
+   * @note For each choice (i.e. `n`), a request is defined by a single `prefill()` and multiple
+   * `decode()`. This is important as it determines the behavior of various fields including `seed`.
    */
-  async unload() {
-    this.deviceLostIsError = false; // so that unload() does not trigger device.lost error
-    this.pipeline?.dispose();
-    // Wait until device is actually destroyed so we can safely set deviceLostIsError back to true
-    await this.pipeline?.sync();
-    this.pipeline = undefined;
-    this.currentModelId = undefined;
-    this.deviceLostIsError = true;
-    if (this.reloadController) {
-      this.reloadController.abort("Engine.unload() is called.");
-      this.reloadController = undefined;
+  async completion(
+    request: CompletionCreateParamsNonStreaming,
+  ): Promise<Completion>;
+  async completion(
+    request: CompletionCreateParamsStreaming,
+  ): Promise<AsyncIterable<Completion>>;
+  async completion(
+    request: CompletionCreateParamsBase,
+  ): Promise<AsyncIterable<Completion> | Completion>;
+  async completion(
+    request: CompletionCreateParams,
+  ): Promise<AsyncIterable<Completion> | Completion> {
+    // 0. Preprocess inputs
+    if (!this.currentModelId) {
+      throw new ModelNotLoadedError();
     }
+    API.postInitAndCheckFieldsCompletion(request, this.currentModelId);
+    const genConfig: GenerationConfig = {
+      frequency_penalty: request.frequency_penalty,
+      presence_penalty: request.presence_penalty,
+      max_tokens: request.max_tokens,
+      stop: request.stop,
+      top_p: request.top_p,
+      temperature: request.temperature,
+      logit_bias: request.logit_bias,
+      logprobs: request.logprobs,
+      top_logprobs: request.top_logprobs,
+    };
+
+    // 1. If request is streaming, return an AsyncIterable (an iterable version of `_generate()`)
+    if (request.stream) {
+      return this.asyncGenerate(request, genConfig);
+    }
+
+    if (request.seed !== null && request.seed !== undefined) {
+      this.getPipeline().setSeed(request.seed);
+    }
+
+    // 2. If request is non-streaming, directly reuse `_generate()`
+    const n = request.n ? request.n : 1;
+    const choices: Array<CompletionChoice> = [];
+    let completion_tokens = 0;
+    let prompt_tokens = 0;
+    let prefill_time = 0;
+    let decode_time = 0;
+    for (let i = 0; i < n; i++) {
+      let outputMessage: string;
+      if (this.interruptSignal) {
+        // A single interrupt signal should stop all choices' generations
+        this.getPipeline().triggerStop();
+        outputMessage = "";
+      } else {
+        outputMessage = await this._generate(
+          request,
+          /*progressCallback=*/ undefined,
+          /*streamInterval=*/ 1,
+          /*genConfig=*/ genConfig,
+        );
+      }
+      const finish_reason = this.getFinishReason()!;
+
+      choices.push({
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        finish_reason: finish_reason,
+        index: i,
+        logprobs: request.logprobs
+          ? ({
+              content: this.getPipeline().getTokenLogprobArray(),
+            } as ChatCompletion.Choice.Logprobs)
+          : null,
+        text: request.echo ? request.prompt + outputMessage : outputMessage,
+      });
+      completion_tokens += this.getPipeline().getCurRoundDecodingTotalTokens();
+      prompt_tokens += this.getPipeline().getCurRoundPrefillTotalTokens();
+      prefill_time += this.getPipeline().getCurRoundPrefillTotalTime();
+      decode_time += this.getPipeline().getCurRoundDecodingTotalTime();
+    }
+
+    const response: Completion = {
+      id: crypto.randomUUID(),
+      choices: choices,
+      model: this.currentModelId,
+      object: "text_completion",
+      created: Date.now(),
+      usage: {
+        completion_tokens: completion_tokens,
+        prompt_tokens: prompt_tokens,
+        total_tokens: completion_tokens + prompt_tokens,
+        extra: {
+          prefill_tokens_per_s: prompt_tokens / prefill_time,
+          decode_tokens_per_s: completion_tokens / decode_time,
+        },
+      } as CompletionUsage,
+    };
+
+    // Reset seed -- we do not want this seed to affect future requests
+    if (request.seed !== null && request.seed !== undefined) {
+      this.getPipeline().setSeed(Date.now());
+    }
+    return response;
   }
+
+  //-----------------------------
+  // 4. WebGPU info-querying helpers
+  //-----------------------------
 
   async getMaxStorageBufferBindingSize(): Promise<number> {
     // First detect GPU
@@ -731,9 +922,16 @@ export class MLCEngine implements MLCEngineInterface {
     return gpuDetectOutput.adapterInfo.vendor;
   }
 
-  //--------------------------
-  // Lower level API
-  //--------------------------
+  //----------------------------------------------
+  // 5. Low-level APIs that interact with pipeline
+  //----------------------------------------------
+  private getPipeline(): LLMChatPipeline {
+    if (this.pipeline === undefined) {
+      throw new ChatModuleNotInitializedError();
+    }
+    return this.pipeline;
+  }
+
   async forwardTokensAndSample(
     inputIds: Array<number>,
     isPrefill: boolean,
@@ -773,208 +971,18 @@ export class MLCEngine implements MLCEngineInterface {
     log.setLevel(logLevel);
   }
 
-  /**
-   * Get a new Conversation object based on the chat completion request.
-   *
-   * @param request The incoming ChatCompletionRequest
-   * @note `request.messages[-1]` is not included as it would be treated as a normal input to
-   * `prefill()`.
-   */
-  private getConversationFromChatCompletionRequest(
-    request: ChatCompletionRequest,
-    config: ChatConfig,
-  ): Conversation {
-    // 0. Instantiate a new Conversation object
-    const conversation = getConversation(
-      config.conv_template,
-      config.conv_config,
+  async runtimeStatsText(): Promise<string> {
+    log.warn(
+      "WARNING: `runtimeStatsText()` will soon be deprecated. " +
+        "Please use `ChatCompletion.usage` for non-streaming requests, or " +
+        "`ChatCompletionChunk.usage` for streaming requests, enabled by `stream_options`. " +
+        "The only flow that expects to use `runtimeStatsText()` as of now is `forwardTokensAndSample()`.",
     );
-
-    // 1. Populate function-calling-related fields
-    // TODO: either remove these or support gorilla-like function calling models.
-    // These commented code was used to support gorilla, but we could not use grammar to
-    // guarantee its output, nor make it conform to OpenAI's function calling output. Kept for now.
-    // const functionCallUsage = this.getFunctionCallUsage(request);
-    // conversation.function_string = functionCallUsage;
-    // conversation.use_function_calling = functionCallUsage !== "";
-
-    // 2. Populate conversation.messages
-    const input = request.messages;
-    const lastId = input.length - 1;
-    if (
-      (input[lastId].role !== "user" && input[lastId].role !== "tool") ||
-      typeof input[lastId].content !== "string"
-    ) {
-      // TODO(Charlie): modify condition after we support multimodal inputs
-      throw new MessageOrderError(
-        "The last message should be a string from the `user` or `tool`.",
-      );
-    }
-    for (let i = 0; i < input.length - 1; i++) {
-      const message: ChatCompletionMessageParam = input[i];
-      if (message.role === "system") {
-        if (i !== 0) {
-          throw new SystemMessageOrderError();
-        }
-        conversation.override_system_message = message.content;
-      } else if (message.role === "user") {
-        if (typeof message.content !== "string") {
-          // TODO(Charlie): modify condition after we support multimodal inputs
-          throw new ContentTypeError(message.role + "'s message");
-        }
-        conversation.appendMessage(Role.user, message.content, message.name);
-      } else if (message.role === "assistant") {
-        if (typeof message.content !== "string") {
-          throw new ContentTypeError(message.role + "'s message");
-        }
-        conversation.appendMessage(
-          Role.assistant,
-          message.content,
-          message.name,
-        );
-      } else if (message.role === "tool") {
-        conversation.appendMessage(Role.tool, message.content);
-      } else {
-        // Use `["role"]` instead of `.role` to suppress "Property does not exist on type 'never'"
-        throw new UnsupportedRoleError(message["role"]);
-      }
-    }
-    return conversation;
+    return this.getPipeline().runtimeStatsText();
   }
 
-  /**
-   * Returns the function string based on the request.tools and request.tool_choice, raises erros if
-   * encounter invalid request.
-   *
-   * @param request The chatCompletionRequest we are about to prefill for.
-   * @returns The string used to set Conversatoin.function_string
-   */
-  private getFunctionCallUsage(request: ChatCompletionRequest): string {
-    if (
-      request.tools == undefined ||
-      (typeof request.tool_choice == "string" && request.tool_choice == "none")
-    ) {
-      return "";
-    }
-    if (
-      typeof request.tool_choice == "string" &&
-      request.tool_choice !== "auto"
-    ) {
-      throw new InvalidToolChoiceError(request.tool_choice);
-    }
-    if (
-      typeof request.tool_choice !== "string" &&
-      request.tool_choice?.type !== "function"
-    ) {
-      throw new UnsupportedToolChoiceTypeError();
-    }
-
-    const singleFunctionToCall =
-      typeof request.tool_choice !== "string" &&
-      request.tool_choice?.function?.name;
-    if (singleFunctionToCall) {
-      for (const f of request.tools) {
-        if (singleFunctionToCall == f.function.name) {
-          return JSON.stringify([f.function]);
-        }
-      }
-      throw new FunctionNotFoundError(singleFunctionToCall);
-    }
-
-    const function_list = [];
-    for (const f of request.tools) {
-      if (f.type !== "function") {
-        throw new UnsupportedToolTypeError();
-      }
-      function_list.push(f.function);
-    }
-    return JSON.stringify(function_list);
-  }
-
-  /**
-   * Given a string outputMessage, parse it as a JSON object and return an array of tool calls.
-   *
-   * Expect outputMessage to be a valid JSON string, and expect it to be an array of Function with
-   * fields `arguments` and `name`.
-   */
-  private getToolCallFromOutputMessage(
-    outputMessage: string,
-    isStreaming: false,
-  ): Array<ChatCompletionMessageToolCall>;
-  private getToolCallFromOutputMessage(
-    outputMessage: string,
-    isStreaming: true,
-  ): Array<ChatCompletionChunk.Choice.Delta.ToolCall>;
-  private getToolCallFromOutputMessage(
-    outputMessage: string,
-    isStreaming: boolean,
-  ):
-    | Array<ChatCompletionMessageToolCall>
-    | Array<ChatCompletionChunk.Choice.Delta.ToolCall> {
-    // 1. Parse outputMessage to JSON object
-    let toolCallsObject;
-    try {
-      toolCallsObject = JSON.parse(outputMessage);
-    } catch (err) {
-      throw new ToolCallOutputParseError(outputMessage, err as Error);
-    }
-
-    // 2. Expect to be an array
-    if (!(toolCallsObject instanceof Array)) {
-      throw new ToolCallOutputInvalidTypeError("array");
-    }
-
-    // 3. Parse each tool call and populate tool_calls
-    const numToolCalls = toolCallsObject.length;
-    const tool_calls = [];
-    for (let id = 0; id < numToolCalls; id++) {
-      const curToolCall = toolCallsObject[id];
-      if (
-        curToolCall.name === undefined ||
-        curToolCall.arguments === undefined
-      ) {
-        throw new ToolCallOutputMissingFieldsError(
-          ["name", "arguments"],
-          curToolCall,
-        );
-      }
-      tool_calls.push({
-        name: curToolCall.name,
-        arguments: JSON.stringify(curToolCall.arguments),
-      });
-    }
-
-    // 4. Return based on whether it is streaming or not
-    if (isStreaming) {
-      const tool_calls_result: Array<ChatCompletionChunk.Choice.Delta.ToolCall> =
-        [];
-      for (let id = 0; id < numToolCalls; id++) {
-        const curToolCall = tool_calls[id];
-        tool_calls_result.push({
-          index: id,
-          function: {
-            name: curToolCall.name,
-            arguments: curToolCall.arguments,
-          },
-          type: "function",
-        });
-      }
-      return tool_calls_result;
-    } else {
-      const tool_calls_result: Array<ChatCompletionMessageToolCall> = [];
-      for (let id = 0; id < numToolCalls; id++) {
-        const curToolCall = tool_calls[id];
-        tool_calls_result.push({
-          id: id.toString(),
-          function: {
-            name: curToolCall.name,
-            arguments: curToolCall.arguments,
-          },
-          type: "function",
-        });
-      }
-      return tool_calls_result;
-    }
+  async resetChat(keepStats = false) {
+    this.pipeline?.resetChat(keepStats);
   }
 
   /**
@@ -991,7 +999,7 @@ export class MLCEngine implements MLCEngineInterface {
    * @param input The input prompt, or `messages` in OpenAI-like APIs.
    */
   async prefill(
-    input: string | ChatCompletionRequest,
+    input: string | ChatCompletionRequest | CompletionCreateParams,
     genConfig?: GenerationConfig,
   ) {
     if (this.config === undefined) {
@@ -1002,10 +1010,11 @@ export class MLCEngine implements MLCEngineInterface {
     let lastMsgRole = Role.user;
     if (typeof input === "string") {
       input_str = input;
-    } else {
+    } else if ("messages" in input) {
+      // For ChatCompletionRequest, we prepare input using `messages`
       // 1. Get new conversation based on request, determine if we are in multiround chatting
       const oldConv = this.getPipeline().getConversationObject();
-      const newConv = this.getConversationFromChatCompletionRequest(
+      const newConv = getConversationFromChatCompletionRequest(
         input,
         this.config,
       );
@@ -1029,6 +1038,16 @@ export class MLCEngine implements MLCEngineInterface {
       input_role_str =
         last_msg.role === "user" && last_msg.name ? last_msg.name : undefined;
       lastMsgRole = last_msg.role === "tool" ? Role.tool : Role.user;
+    } else {
+      // For CompletionCreateParams, the input is just the prompt
+      input_str = input.prompt;
+      this.resetChat();
+      const newConv = getConversation(
+        this.config.conv_template,
+        this.config.conv_config,
+        true,
+      );
+      this.getPipeline().setConversation(newConv);
     }
     return this.getPipeline().prefillStep(
       input_str,
@@ -1043,43 +1062,5 @@ export class MLCEngine implements MLCEngineInterface {
    */
   async decode(genConfig?: GenerationConfig) {
     return this.getPipeline().decodeStep(genConfig);
-  }
-
-  private getPipeline(): LLMChatPipeline {
-    if (this.pipeline === undefined) {
-      throw new ChatModuleNotInitializedError();
-    }
-    return this.pipeline;
-  }
-
-  private async asyncLoadTokenizer(
-    baseUrl: string,
-    config: ChatConfig,
-    appConfig: AppConfig,
-  ): Promise<Tokenizer> {
-    let modelCache: tvmjs.ArtifactCacheTemplate;
-    if (appConfig.useIndexedDBCache) {
-      modelCache = new tvmjs.ArtifactIndexedDBCache("webllm/model");
-    } else {
-      modelCache = new tvmjs.ArtifactCache("webllm/model");
-    }
-
-    if (config.tokenizer_files.includes("tokenizer.json")) {
-      const url = new URL("tokenizer.json", baseUrl).href;
-      const model = await modelCache.fetchWithCache(url, "arraybuffer");
-      return Tokenizer.fromJSON(model);
-    } else if (config.tokenizer_files.includes("tokenizer.model")) {
-      this.logger(
-        "Using `tokenizer.model` since we cannot locate `tokenizer.json`.\n" +
-          "It is recommended to use `tokenizer.json` to ensure all token mappings are included, " +
-          "since currently, files like `added_tokens.json`, `tokenizer_config.json` are ignored.\n" +
-          "Consider converting `tokenizer.model` to `tokenizer.json` by compiling the model " +
-          "with MLC again, or see if MLC's huggingface provides this file.",
-      );
-      const url = new URL("tokenizer.model", baseUrl).href;
-      const model = await modelCache.fetchWithCache(url, "arraybuffer");
-      return Tokenizer.fromSentencePiece(model);
-    }
-    throw new UnsupportedTokenizerFilesError(config.tokenizer_files);
   }
 }
