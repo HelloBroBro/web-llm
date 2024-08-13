@@ -10,6 +10,7 @@ import {
   Role,
   MLCEngineConfig,
   DefaultLogLevel,
+  ModelType,
 } from "./config";
 import { LLMChatPipeline } from "./llm_chat";
 import {
@@ -31,12 +32,14 @@ import {
   CompletionCreateParams,
   Completion,
   CompletionChoice,
+  EmbeddingCreateParams,
+  CreateEmbeddingResponse,
+  Embedding,
 } from "./openai_api_protocols/index";
 import * as API from "./openai_api_protocols/index";
 import {
   InitProgressCallback,
   MLCEngineInterface,
-  GenerateProgressCallback,
   LogitProcessor,
   LogLevel,
 } from "./types";
@@ -45,19 +48,24 @@ import {
   getConversation,
   getConversationFromChatCompletionRequest,
 } from "./conversation";
-import { cleanModelUrl, getToolCallFromOutputMessage } from "./support";
 import {
-  ChatModuleNotInitializedError,
+  cleanModelUrl,
+  findModelRecord,
+  getToolCallFromOutputMessage,
+} from "./support";
+import {
+  EngineNotLoadedError,
   ConfigurationNotInitializedError,
   DeviceLostError,
+  EmbeddingUnsupportedModelError,
   FeatureSupportError,
   MissingModelWasmError,
-  ModelNotFoundError,
   ModelNotLoadedError,
   ShaderF16SupportError,
   WebGPUNotAvailableError,
 } from "./error";
 import { asyncLoadTokenizer } from "./cache_util";
+import { EmbeddingPipeline } from "./embedding";
 
 /**
  * Creates `MLCEngine`, and loads `modelId` onto WebGPU.
@@ -93,12 +101,15 @@ export class MLCEngine implements MLCEngineInterface {
   public chat: API.Chat;
   /** For completions.create() */
   public completions: API.Completions;
+  /** For embeddings.create() */
+  public embeddings: API.Embeddings;
 
   private currentModelId?: string = undefined; // Model current loaded, undefined if nothing is loaded
   private logger: (msg: string) => void = log.info;
   private logitProcessorRegistry?: Map<string, LogitProcessor>;
   private logitProcessor?: LogitProcessor;
   private pipeline?: LLMChatPipeline;
+  private embeddingPipeline?: EmbeddingPipeline;
   private initProgressCallback?: InitProgressCallback;
   private interruptSignal = false;
   private deviceLostIsError = true; // whether device.lost is due to actual error or model reload
@@ -114,6 +125,7 @@ export class MLCEngine implements MLCEngineInterface {
 
     this.chat = new API.Chat(this);
     this.completions = new API.Completions(this);
+    this.embeddings = new API.Embeddings(this);
   }
 
   //-----------------------
@@ -174,15 +186,7 @@ export class MLCEngine implements MLCEngineInterface {
     this.logitProcessor = this.logitProcessorRegistry?.get(modelId);
     const tstart = performance.now();
 
-    const findModelRecord = () => {
-      const matchedItem = this.appConfig?.model_list.find(
-        (item) => item.model_id == modelId,
-      );
-      if (matchedItem !== undefined) return matchedItem;
-      throw new ModelNotFoundError(modelId);
-    };
-
-    const modelRecord = findModelRecord();
+    const modelRecord = findModelRecord(modelId, this.appConfig);
     const baseUrl =
       typeof document !== "undefined"
         ? document.URL
@@ -305,12 +309,20 @@ export class MLCEngine implements MLCEngineInterface {
       cacheType,
       this.reloadController?.signal,
     );
-    this.pipeline = new LLMChatPipeline(
-      tvm,
-      tokenizer,
-      this.config,
-      this.logitProcessor,
-    );
+    if (modelRecord.model_type === ModelType.embedding) {
+      this.embeddingPipeline = new EmbeddingPipeline(
+        tvm,
+        tokenizer,
+        this.config,
+      );
+    } else {
+      this.pipeline = new LLMChatPipeline(
+        tvm,
+        tokenizer,
+        this.config,
+        this.logitProcessor,
+      );
+    }
     await this.pipeline?.asyncLoadWebGPUPipelines();
     const tend = performance.now();
 
@@ -337,9 +349,12 @@ export class MLCEngine implements MLCEngineInterface {
   async unload() {
     this.deviceLostIsError = false; // so that unload() does not trigger device.lost error
     this.pipeline?.dispose();
+    this.embeddingPipeline?.dispose();
     // Wait until device is actually destroyed so we can safely set deviceLostIsError back to true
     await this.pipeline?.sync();
+    await this.embeddingPipeline?.sync();
     this.pipeline = undefined;
+    this.embeddingPipeline = undefined;
     this.currentModelId = undefined;
     this.deviceLostIsError = true;
     if (this.reloadController) {
@@ -357,8 +372,6 @@ export class MLCEngine implements MLCEngineInterface {
       | string
       | ChatCompletionRequestNonStreaming
       | CompletionCreateParamsNonStreaming,
-    progressCallback?: GenerateProgressCallback,
-    streamInterval = 1,
     genConfig?: GenerationConfig,
   ): Promise<string> {
     this.interruptSignal = false;
@@ -375,9 +388,6 @@ export class MLCEngine implements MLCEngineInterface {
       }
       counter += 1;
       await this.decode(genConfig);
-      if (counter % streamInterval == 0 && progressCallback !== undefined) {
-        progressCallback(counter, await this.getMessage());
-      }
     }
     return await this.getMessage();
   }
@@ -620,24 +630,6 @@ export class MLCEngine implements MLCEngineInterface {
   //------------------------------
 
   /**
-   * A legacy E2E generation API. Functionally equivalent to `chatCompletion()`.
-   */
-  async generate(
-    input: string | ChatCompletionRequestNonStreaming,
-    progressCallback?: GenerateProgressCallback,
-    streamInterval = 1,
-    genConfig?: GenerationConfig,
-  ): Promise<string> {
-    log.warn(
-      "WARNING: `generate()` will soon be deprecated. " +
-        "Please use `engine.chat.completions.create()` instead. " +
-        "For multi-round chatting, see `examples/multi-round-chat` on how to use " +
-        "`engine.chat.completions.create()` to achieve the same effect.",
-    );
-    return this._generate(input, progressCallback, streamInterval, genConfig);
-  }
-
-  /**
    * Completes a single ChatCompletionRequest.
    *
    * @param request A OpenAI-style ChatCompletion request.
@@ -698,12 +690,7 @@ export class MLCEngine implements MLCEngineInterface {
         this.getPipeline().triggerStop();
         outputMessage = "";
       } else {
-        outputMessage = await this._generate(
-          request,
-          /*progressCallback=*/ undefined,
-          /*streamInterval=*/ 1,
-          /*genConfig=*/ genConfig,
-        );
+        outputMessage = await this._generate(request, genConfig);
       }
       let finish_reason = this.getFinishReason()!;
 
@@ -830,12 +817,7 @@ export class MLCEngine implements MLCEngineInterface {
         this.getPipeline().triggerStop();
         outputMessage = "";
       } else {
-        outputMessage = await this._generate(
-          request,
-          /*progressCallback=*/ undefined,
-          /*streamInterval=*/ 1,
-          /*genConfig=*/ genConfig,
-        );
+        outputMessage = await this._generate(request, genConfig);
       }
       const finish_reason = this.getFinishReason()!;
 
@@ -878,6 +860,52 @@ export class MLCEngine implements MLCEngineInterface {
       this.getPipeline().setSeed(Date.now());
     }
     return response;
+  }
+
+  async embedding(
+    request: EmbeddingCreateParams,
+  ): Promise<CreateEmbeddingResponse> {
+    // 0. Preprocess inputs
+    if (!this.currentModelId) {
+      throw new ModelNotLoadedError();
+    }
+    if (
+      findModelRecord(this.currentModelId, this.appConfig).model_type !==
+      ModelType.embedding
+    ) {
+      throw new EmbeddingUnsupportedModelError(this.currentModelId);
+    }
+    API.postInitAndCheckFieldsEmbedding(request, this.currentModelId);
+
+    // 1. Call EmbeddingPipeline to get embeddings
+    const embedResult: Array<Array<number>> =
+      await this.getEmbeddingPipeline().embedStep(request.input);
+
+    // 2. Prepare response
+    const batchSize = embedResult.length;
+    const data: Array<Embedding> = [];
+    for (let i = 0; i < batchSize; i++) {
+      const curEmbedding: Embedding = {
+        embedding: embedResult[i],
+        index: i,
+        object: "embedding",
+      };
+      data.push(curEmbedding);
+    }
+    return {
+      data: data,
+      model: this.currentModelId,
+      object: "list",
+      usage: {
+        prompt_tokens:
+          this.getEmbeddingPipeline().getCurRoundEmbedTotalTokens(),
+        total_tokens: this.getEmbeddingPipeline().getCurRoundEmbedTotalTokens(),
+        extra: {
+          prefill_tokens_per_s:
+            this.getEmbeddingPipeline().getCurRoundEmbedTokensPerSec(),
+        },
+      },
+    };
   }
 
   //-----------------------------
@@ -927,9 +955,16 @@ export class MLCEngine implements MLCEngineInterface {
   //----------------------------------------------
   private getPipeline(): LLMChatPipeline {
     if (this.pipeline === undefined) {
-      throw new ChatModuleNotInitializedError();
+      throw new EngineNotLoadedError();
     }
     return this.pipeline;
+  }
+
+  private getEmbeddingPipeline(): EmbeddingPipeline {
+    if (this.embeddingPipeline === undefined) {
+      throw new EngineNotLoadedError();
+    }
+    return this.embeddingPipeline;
   }
 
   async forwardTokensAndSample(

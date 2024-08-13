@@ -1,12 +1,6 @@
-import {
-  AppConfig,
-  ChatOptions,
-  MLCEngineConfig,
-  GenerationConfig,
-} from "./config";
+import { AppConfig, ChatOptions, MLCEngineConfig } from "./config";
 import {
   MLCEngineInterface,
-  GenerateProgressCallback,
   InitProgressCallback,
   InitProgressReport,
   LogLevel,
@@ -24,20 +18,21 @@ import {
   CompletionCreateParamsStreaming,
   CompletionCreateParamsBase,
   CompletionCreateParams,
+  CreateEmbeddingResponse,
+  EmbeddingCreateParams,
 } from "./openai_api_protocols/index";
 import * as API from "./openai_api_protocols/index";
 import {
   MessageContent,
   ReloadParams,
-  GenerateParams,
   ForwardTokensAndSampleParams,
   ChatCompletionNonStreamingParams,
   ChatCompletionStreamInitParams,
   ResetChatParams,
-  GenerateProgressCallbackParams,
   WorkerResponse,
   WorkerRequest,
   CompletionNonStreamingParams,
+  EmbeddingParams,
   CompletionStreamInitParams,
 } from "./message";
 import log from "loglevel";
@@ -150,31 +145,6 @@ export class WebWorkerMLCEngineHandler {
         });
         return;
       }
-      case "generate": {
-        this.handleTask(msg.uuid, async () => {
-          const params = msg.content as GenerateParams;
-          const progressCallback = (step: number, currentMessage: string) => {
-            const cbMessage: WorkerResponse = {
-              kind: "generateProgressCallback",
-              uuid: msg.uuid,
-              content: {
-                step: step,
-                currentMessage: currentMessage,
-              },
-            };
-            this.postMessage(cbMessage);
-          };
-          const res = await this.engine.generate(
-            params.input,
-            progressCallback,
-            params.streamInterval,
-            params.genConfig,
-          );
-          onComplete?.(res);
-          return res;
-        });
-        return;
-      }
       case "forwardTokensAndSample": {
         this.handleTask(msg.uuid, async () => {
           const params = msg.content as ForwardTokensAndSampleParams;
@@ -187,7 +157,7 @@ export class WebWorkerMLCEngineHandler {
         });
         return;
       }
-      // For engine.chat.completions()
+      // For engine.chat.completions.create()
       case "chatCompletionNonStreaming": {
         // Directly return the ChatCompletion response
         this.handleTask(msg.uuid, async () => {
@@ -212,7 +182,7 @@ export class WebWorkerMLCEngineHandler {
         });
         return;
       }
-      // engine.completions()
+      // For engine.completions.create()
       case "completionNonStreaming": {
         // Directly return the ChatCompletion response
         this.handleTask(msg.uuid, async () => {
@@ -237,7 +207,7 @@ export class WebWorkerMLCEngineHandler {
         });
         return;
       }
-      // Shared by engine.chat.completions() and engine.completions()
+      // Shared by engine.chat.completions.create() and engine.completions.create()
       case "completionStreamNextChunk": {
         // Note: ChatCompletion and Completion share the same chunk generator.
         // For any subsequent request, we return whatever `next()` yields
@@ -251,6 +221,18 @@ export class WebWorkerMLCEngineHandler {
           const { value } = await this.asyncGenerate.next();
           onComplete?.(value);
           return value;
+        });
+        return;
+      }
+      // For engine.embeddings.create()
+      case "embedding": {
+        // Directly return the Embeddings response
+        this.handleTask(msg.uuid, async () => {
+          const params = msg.content as EmbeddingParams;
+          await this.reloadIfUnmatched(params.modelId, params.chatOpts);
+          const res = await this.engine.embedding(params.request);
+          onComplete?.(res);
+          return res;
         });
         return;
       }
@@ -406,6 +388,8 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
   public chat: API.Chat;
   /** For completions.create() */
   public completions: API.Completions;
+  /** For embeddings.create() */
+  public embeddings: API.Embeddings;
 
   /**
    * The modelId and chatOpts that the frontend expects the backend engine is currently loaded
@@ -416,10 +400,6 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
   chatOpts?: ChatOptions;
 
   private initProgressCallback?: InitProgressCallback;
-  private generateCallbackRegistry = new Map<
-    string,
-    GenerateProgressCallback
-  >();
   private pendingPromise = new Map<string, (msg: WorkerResponse) => void>();
 
   constructor(worker: ChatWorker, engineConfig?: MLCEngineConfig) {
@@ -445,6 +425,7 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
 
     this.chat = new API.Chat(this);
     this.completions = new API.Completions(this);
+    this.embeddings = new API.Embeddings(this);
   }
 
   setInitProgressCallback(initProgressCallback?: InitProgressCallback) {
@@ -538,27 +519,6 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
       uuid: crypto.randomUUID(),
       content: null,
     };
-    return await this.getPromise<string>(msg);
-  }
-
-  async generate(
-    input: string | ChatCompletionRequestNonStreaming,
-    progressCallback?: GenerateProgressCallback,
-    streamInterval?: number,
-    genConfig?: GenerationConfig,
-  ): Promise<string> {
-    const msg: WorkerRequest = {
-      kind: "generate",
-      uuid: crypto.randomUUID(),
-      content: {
-        input: input,
-        streamInterval: streamInterval,
-        genConfig: genConfig,
-      },
-    };
-    if (progressCallback !== undefined) {
-      this.generateCallbackRegistry.set(msg.uuid, progressCallback);
-    }
     return await this.getPromise<string>(msg);
   }
 
@@ -741,6 +701,24 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
     return await this.getPromise<Completion>(msg);
   }
 
+  async embedding(
+    request: EmbeddingCreateParams,
+  ): Promise<CreateEmbeddingResponse> {
+    if (this.modelId === undefined) {
+      throw new WorkerEngineModelNotLoadedError(this.constructor.name);
+    }
+    const msg: WorkerRequest = {
+      kind: "embedding",
+      uuid: crypto.randomUUID(),
+      content: {
+        request: request,
+        modelId: this.modelId,
+        chatOpts: this.chatOpts,
+      },
+    };
+    return await this.getPromise<CreateEmbeddingResponse>(msg);
+  }
+
   onmessage(event: any) {
     let msg: WorkerResponse;
     if (event instanceof MessageEvent) {
@@ -752,14 +730,6 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
       case "initProgressCallback": {
         if (this.initProgressCallback !== undefined) {
           this.initProgressCallback(msg.content as InitProgressReport);
-        }
-        return;
-      }
-      case "generateProgressCallback": {
-        const params = msg.content as GenerateProgressCallbackParams;
-        const cb = this.generateCallbackRegistry.get(msg.uuid);
-        if (cb !== undefined) {
-          cb(params.step, params.currentMessage);
         }
         return;
       }

@@ -1,13 +1,13 @@
 {
-  "name": "get-started-web-worker",
+  "name": "embeddings-example",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "parcel src/get_started.html  --port 8885",
-    "build": "parcel build src/get_started.html --dist-dir lib"
+    "start": "parcel src/embeddings.html  --port 8885",
+    "build": "parcel build src/embeddings.html --dist-dir lib"
   },
   "devDependencies": {
-    "buffer": "^6.0.3",
+    "buffer": "^5.7.1",
     "parcel": "^2.8.3",
     "process": "^0.11.10",
     "tslib": "^2.3.1",
@@ -15,6 +15,7 @@
     "url": "^0.11.3"
   },
   "dependencies": {
-    "@mlc-ai/web-llm": "^0.2.58"
+    "@mlc-ai/web-llm": "^0.2.58",
+    "langchain": "0.2.15"
   }
 }

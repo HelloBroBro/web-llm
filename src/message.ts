@@ -8,6 +8,8 @@ import {
   CompletionCreateParamsNonStreaming,
   CompletionCreateParamsStreaming,
   Completion,
+  EmbeddingCreateParams,
+  CreateEmbeddingResponse,
 } from "./openai_api_protocols/index";
 
 /**
@@ -15,7 +17,6 @@ import {
  */
 type RequestKind =
   | "reload"
-  | "generate"
   | "runtimeStatsText"
   | "interruptGenerate"
   | "unload"
@@ -25,6 +26,7 @@ type RequestKind =
   | "forwardTokensAndSample"
   | "chatCompletionNonStreaming"
   | "completionNonStreaming"
+  | "embedding"
   | "getMessage"
   | "chatCompletionStreamInit"
   | "completionStreamInit"
@@ -35,27 +37,14 @@ type RequestKind =
   | "setAppConfig";
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-type ResponseKind =
-  | "return"
-  | "throw"
-  | "initProgressCallback"
-  | "generateProgressCallback";
+type ResponseKind = "return" | "throw" | "initProgressCallback";
 
 export interface ReloadParams {
   modelId: string;
   chatOpts?: ChatOptions;
 }
-export interface GenerateParams {
-  input: string | ChatCompletionRequestNonStreaming;
-  streamInterval?: number;
-  genConfig?: GenerationConfig;
-}
 export interface ResetChatParams {
   keepStats: boolean;
-}
-export interface GenerateProgressCallbackParams {
-  step: number;
-  currentMessage: string;
 }
 export interface ForwardTokensAndSampleParams {
   inputIds: Array<number>;
@@ -93,21 +82,28 @@ export interface CompletionStreamInitParams {
   modelId: string;
   chatOpts: ChatOptions;
 }
+export interface EmbeddingParams {
+  request: EmbeddingCreateParams;
+  // The model and chatOpts that the frontend engine expects the backend to be loaded with.
+  // If not loaded due to service worker unexpectedly killed, handler will call reload().
+  // TODO(webllm-team): should add appConfig here as well.
+  modelId: string;
+  chatOpts: ChatOptions;
+}
 
 export interface CustomRequestParams {
   requestName: string;
   requestMessage: string;
 }
 export type MessageContent =
-  | GenerateProgressCallbackParams
   | ReloadParams
-  | GenerateParams
   | ResetChatParams
   | ForwardTokensAndSampleParams
   | ChatCompletionNonStreamingParams
   | ChatCompletionStreamInitParams
   | CompletionNonStreamingParams
   | CompletionStreamInitParams
+  | EmbeddingParams
   | CustomRequestParams
   | InitProgressReport
   | LogLevel
@@ -116,6 +112,7 @@ export type MessageContent =
   | number
   | ChatCompletion
   | ChatCompletionChunk
+  | CreateEmbeddingResponse
   | Completion
   | AppConfig
   | void;
@@ -147,17 +144,7 @@ type InitProgressWorkerResponse = {
   content: InitProgressReport;
 };
 
-type GenerateProgressWorkerResponse = {
-  kind: "generateProgressCallback";
-  uuid: string;
-  content: {
-    step: number;
-    currentMessage: string;
-  };
-};
-
 export type WorkerResponse =
   | OneTimeWorkerResponse
   | InitProgressWorkerResponse
-  | GenerateProgressWorkerResponse
   | HeartbeatWorkerResponse;
