@@ -1,13 +1,13 @@
 {
-  "name": "web-llm-service-worker",
+  "name": "get-started",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "rm -rf .parcel-cache && parcel src/index.html --port 3000",
-    "build": "rm -rf .parcel-cache && parcel build src/index.html --dist-dir lib"
+    "start": "parcel src/vision_model.html  --port 8888",
+    "build": "parcel build src/vision_model.html --dist-dir lib"
   },
   "devDependencies": {
-    "buffer": "^6.0.3",
+    "buffer": "^5.7.1",
     "parcel": "^2.8.3",
     "process": "^0.11.10",
     "tslib": "^2.3.1",
